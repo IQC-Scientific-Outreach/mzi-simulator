@@ -180,7 +180,7 @@
   .bs-controls{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:14px; padding:12px; background:#f6f4ee; border-radius:8px; border:1px solid var(--line); }
   .complexity-switch{ transform: scale(0.85); transform-origin: left center; margin: 2px 0 10px; }
   .complexity-row{ display:flex; align-items:center; gap:8px; margin-bottom:6px; }
-  .complexity-label{ font:700 12.5px var(--sans); color:var(--ink-soft); }
+  .complexity-label{ font:700 12.5px var(--sans); color:var(--ink-soft); min-width: 92px; flex-shrink:0; }
   .photon-row{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:14px; padding:12px; background:#fff; border-radius:8px; border:1px solid var(--line); }
   .photon-controls{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .wave-toggle{ display:flex; align-items:center; gap:6px; font:700 12.5px var(--sans); color:var(--ink-soft); }
@@ -203,6 +203,8 @@
     100%{ r:46; opacity:0; }
   }
   .pulse{ animation: pulse-ring .9s ease-out; transform-origin: center; }
+  .laser-icon{ transition: fill .1s ease; }
+  .laser-icon.emitting{ fill: #e2445f; }
 
   @media (prefers-reduced-motion: reduce){
     .pulse{ animation: none; }
@@ -292,7 +294,7 @@
       <div class="bs-controls" id="bs-controls-row">
         <!-- populated by JS: beamsplitter ratio adjusters (free play, advanced only) -->
       </div>
-      <p class="bank-hint" id="bank-hint">Drag a piece into the Mach-Zehnder inteferometer. Click a piece to remove it. The result updates automatically.</p>
+      <p class="bank-hint" id="bank-hint">Drag or tap-and-place a piece into the Mach-Zehnder interferometer. Click a piece to remove it. The result updates automatically.</p>
     </div>
 
     <!-- SIDEBAR -->
@@ -493,7 +495,7 @@
     const label = displayMode === "photon" ? String(m.count || 0) : Math.round(ndmProbability(key) * 100) + "%";
     // In laser mode there's no sampling — it just continuously "sees" light whenever there's any
     // nonzero probability of it being there, so the open-eye/yellow state reflects that directly
-    // rather than needing a blink. Photon mode instead blinks per-photon (see blinkNdm).
+    // rather than needing a blink. Photon Mode instead reflects the most recent photon (see syncNdmVisualStates).
     const laserSeeing = displayMode === "laser" && ndmProbability(key) > 0;
     return `<g class="mod-icon ndm-icon${laserSeeing ? " detected" : ""}" data-mod-id="${m.id}">
       <rect class="ndm-box" x="${x-16.5}" y="-16.5" width="33" height="33" rx="6" stroke="#1c1b1a" stroke-width="1.2"/>
@@ -505,11 +507,19 @@
       <text class="ndm-counter" x="${x}" y="29" text-anchor="middle" font-size="10.5" font-weight="700" fill="#5b564e" style="font-family:var(--sans);">${label}</text>
     </g>`;
   }
-  function blinkNdm(id){
-    const el = document.querySelector(`.ndm-icon[data-mod-id="${id}"]`);
-    if(!el) return;
-    el.classList.add("detected");
-    setTimeout(()=> el.classList.remove("detected"), 450);
+  // Every placed Observer's eye reflects whether it fired for the MOST RECENT photon -- open/yellow
+  // if it did, closed/gray if it didn't -- and just stays that way (no auto-revert) until the next
+  // photon updates every Observer's state again. This is what lets "the eye didn't open" read as
+  // real information (the photon must have gone the other way) rather than a blink you might miss.
+  function syncNdmVisualStates(firedMods){
+    const firedIds = new Set(firedMods.map(m => m.id));
+    ALL_ZONES.forEach(key=>{
+      modifiers[key].forEach(m=>{
+        if(m.type !== "ndm") return;
+        const el = document.querySelector(`.ndm-icon[data-mod-id="${m.id}"]`);
+        if(el) el.classList.toggle("detected", firedIds.has(m.id));
+      });
+    });
   }
   function blinkBlock(id){
     const el = document.querySelector(`.block-icon[data-mod-id="${id}"]`);
@@ -643,7 +653,7 @@
     fillSvg(lsGroup, `
       <rect class="hit-area" data-seg="src" x="0" y="-28" width="${OUT_LEN}" height="56"></rect>
       <g class="seg-content" data-seg="src"></g>
-      <rect x="-40" y="-17" width="46" height="34" rx="3" fill="var(--crimson)" stroke="#1c1b1a" stroke-width="1.2"/>
+      <rect class="laser-icon" x="-40" y="-17" width="46" height="34" rx="3" fill="var(--crimson)" stroke="#1c1b1a" stroke-width="1.2"/>
     `);
     // label, kept upright and placed near the source icon using plain trigonometry
     const lbl = g("label-source");
@@ -750,13 +760,13 @@
     d2Pct.setAttribute("opacity", "1");
   }
 
+  // Flashes the laser icon itself a brighter red rather than showing a separate glow nearby --
+  // reads more clearly as "the source just fired" than a small ring did.
   function pulseSource(){
-    const group = document.getElementById("light-source-group");
-    if(!group) return;
-    const ring = svgEl("circle", { cx:"-17", cy:"0", r:"6", fill:"none", stroke:"var(--gold)", "stroke-width":"2.5" });
-    ring.classList.add("pulse");
-    group.appendChild(ring);
-    setTimeout(()=> ring.remove(), 950);
+    const rect = document.querySelector(".laser-icon");
+    if(!rect) return;
+    rect.classList.add("emitting");
+    setTimeout(()=> rect.classList.remove("emitting"), 350);
   }
 
   // Simulates ONE photon's actual path through the apparatus as a single correlated event, rather
@@ -791,7 +801,7 @@
       d2Blocked: modifiers.d2out.some(m => m.type === "block"),
       split: computeDetectorSplit()
     };
-    const result = { srcFired: false, d1Fired: false, d2Fired: false, ndmHits: [], blockHits: [], exploded: null };
+    const result = { srcFired: false, d1Fired: false, d2Fired: false, ndmHits: [], blockHits: [], exploded: null, armChosen: null, wentToD1: null };
 
     if(ctx.srcBlocked){
       modifiers.src.forEach(m=>{ if(m.type === "block") result.blockHits.push(m); });
@@ -809,8 +819,10 @@
     if(ctx.armDecoherent){
       // Which-path is meaningful (an observer, a working firework, and/or a block is present on an
       // arm): the photon genuinely travels one specific arm, chosen with its normal, unconditioned
-      // probability -- regardless of what's waiting there.
+      // probability -- regardless of what's waiting there. Recorded on the result (armChosen) even
+      // if it's then absorbed, so the board can show "the light really was here" before it vanished.
       const armChosen = Math.random() < ctx.topI ? "top" : "bottom";
+      result.armChosen = armChosen;
       const armKeys = armChosen === "top" ? ["tl","tr"] : ["bl","br"];
       let absorbed = false;
       armKeys.forEach(k=>{
@@ -825,6 +837,7 @@
       });
       if(absorbed) return result; // caught by the block (or exploded the firework) -- never reaches BS2
       const toD1 = Math.random() < (armChosen === "top" ? ctx.T2 : ctx.R2);
+      result.wentToD1 = toD1;
       if(toD1){
         if(ctx.d1Blocked){ modifiers.d1out.forEach(m=>{ if(m.type === "block") result.blockHits.push(m); }); }
         else {
@@ -846,12 +859,14 @@
       }
     } else {
       // No which-path measurement and neither arm is blocked: which arm the photon "really" took
-      // isn't a meaningful question, so sample the actual (interference-inclusive) detector split
-      // directly -- but a post-BS2 observer, block, or firework still has to match this specific
-      // photon's outcome.
+      // isn't a meaningful question (armChosen stays null), so sample the actual (interference-
+      // inclusive) detector split directly -- but a post-BS2 observer, block, or firework still has
+      // to match this specific photon's outcome, and wentToD1 is still perfectly well-defined even
+      // though armChosen isn't.
       const total = ctx.split.d1 + ctx.split.d2;
       if(total <= 0) return result;
       const toD1 = Math.random() * total < ctx.split.d1;
+      result.wentToD1 = toD1;
       if(toD1){
         if(ctx.d1Blocked){ modifiers.d1out.forEach(m=>{ if(m.type === "block") result.blockHits.push(m); }); }
         else {
@@ -889,14 +904,15 @@
       pulseSource();
       setTimeout(()=>{
         const result = simulateOnePhoton();
+        applyPhotonPathReveal(result.armChosen, result.wentToD1);
         if(result.d1Fired){ photonCounts.d1++; pulseDetector("d1-group"); }
         if(result.d2Fired){ photonCounts.d2++; pulseDetector("d2-group"); }
         result.ndmHits.forEach(mod=>{
           mod.count = (mod.count || 0) + 1;
-          blinkNdm(mod.id);
           const counterEl = document.querySelector(`.ndm-icon[data-mod-id="${mod.id}"] .ndm-counter`);
           if(counterEl) counterEl.textContent = String(mod.count);
         });
+        syncNdmVisualStates(result.ndmHits);
         result.blockHits.forEach(mod=>{
           mod.count = (mod.count || 0) + 1;
           blinkBlock(mod.id);
@@ -1306,8 +1322,8 @@
       const botD = buildWavePath(OUT_LEN, 2, botInit, botBp, amps.bottom * botWeight);
 
       const topOffsetAttr = inPhase ? ` transform="translate(0,${-OVERLAP_OFFSET})"` : "";
-      let inner = botD ? `<path class="wave-path" d="${botD}" stroke="var(--wave-bottom)" stroke-width="3" fill="none" opacity="0.85" stroke-linejoin="round" stroke-linecap="round"/>` : "";
-      if(topD) inner += `<g${topOffsetAttr}><path class="wave-path" d="${topD}" stroke="var(--wave-top)" stroke-width="3" fill="none" opacity="0.85" stroke-linejoin="round" stroke-linecap="round"/></g>`;
+      let inner = botD ? `<path class="wave-path" data-color="bottom" d="${botD}" stroke="var(--wave-bottom)" stroke-width="3" fill="none" opacity="0.85" stroke-linejoin="round" stroke-linecap="round"/>` : "";
+      if(topD) inner += `<g${topOffsetAttr}><path class="wave-path" data-color="top" d="${topD}" stroke="var(--wave-top)" stroke-width="3" fill="none" opacity="0.85" stroke-linejoin="round" stroke-linecap="round"/></g>`;
       inner += modsIcons(outMods, OUT_LEN, outKey);
       return inner;
     }
@@ -1533,7 +1549,7 @@
 
   function renderFreeSidebar(){
     sidebar.innerHTML = `
-      <p class="sidebar-title">Free play</p>
+      <p class="sidebar-title">Settings</p>
       <div id="photon-toggle-row"></div>
       <div class="complexity-row">
         <span class="complexity-label">Components:</span>
@@ -1700,6 +1716,51 @@
     if(svg) svg.classList.toggle("hide-waves", displayMode === "photon" && !showWavesInPhoton);
   }
 
+  // ---------- Per-photon "which path really happened" wave reveal ----------
+  // Before any photon is sent, a collapsing setup (an Observer/Block/working Firework on an arm, or
+  // an Observer at an output) still draws both colored waves as usual -- that's the "we haven't
+  // measured anything yet" state, and it's deliberately left alone. The moment a photon is actually
+  // sent, though, simulateOnePhoton() knows exactly which arm it took and which detector it reached,
+  // so we can show that directly: hide the *other* arm's wave entirely (both of its segments, all
+  // the way back to the previous beamsplitter), or the *other* detector's post-BS2 wave, rather than
+  // continuing to draw an interference pattern that didn't actually happen for this specific photon.
+  // This state just sits there (no auto-revert timer) until the next photon updates it again, or
+  // until autoAnalyze() does a full fresh re-render (e.g. because the setup changed) and naturally
+  // starts every wave visible again.
+  // Applies BOTH pieces of which-path information together for one photon: which arm it took
+  // (revealed by anything on tl/tr/bl/br) and which detector it reached (revealed by an Observer at
+  // d1out/d2out). These are independent facts that can both be known at once, so a given post-BS2
+  // wave is hidden if EITHER fact rules it out -- computed together here rather than as two separate
+  // passes that would silently overwrite one another when both kinds of information are available.
+  function applyPhotonPathReveal(armChosen, wentToD1){
+    if(armChosen !== null){
+      const topShown = armChosen === "top";
+      ["tl","tr"].forEach(key=>{
+        const path = segContentEl(key) && segContentEl(key).querySelector(".wave-path");
+        if(path) path.style.display = topShown ? "" : "none";
+      });
+      ["bl","br"].forEach(key=>{
+        const path = segContentEl(key) && segContentEl(key).querySelector(".wave-path");
+        if(path) path.style.display = topShown ? "none" : "";
+      });
+    }
+    const watchingOutputs = modifiers.d1out.some(m => m.type === "ndm") || modifiers.d2out.some(m => m.type === "ndm");
+    const portKnown = wentToD1 !== null && watchingOutputs;
+    ["d1","d2"].forEach(portKey=>{
+      const el = document.querySelector(`.overlay-content[data-seg="${portKey}"]`);
+      if(!el) return;
+      const thisPortConfirmedAbsent = portKnown && (wentToD1 === (portKey === "d1") ? false : true);
+      el.querySelectorAll('[data-color="top"]').forEach(p=>{
+        const colourConfirmedAbsent = armChosen !== null && armChosen !== "top";
+        p.style.display = (thisPortConfirmedAbsent || colourConfirmedAbsent) ? "none" : "";
+      });
+      el.querySelectorAll('[data-color="bottom"]').forEach(p=>{
+        const colourConfirmedAbsent = armChosen !== null && armChosen !== "bottom";
+        p.style.display = (thisPortConfirmedAbsent || colourConfirmedAbsent) ? "none" : "";
+      });
+    });
+  }
+
   function updateSourceLabel(){
     const lbl = document.getElementById("label-source");
     if(!lbl) return;
@@ -1718,6 +1779,12 @@
     applyWaveVisibility();
     renderPhotonRow();
     updateSourceLabel();
+    // Refresh every zone so Observer icons immediately show the right thing for the new mode
+    // (percentage + "seeing" whenever probability > 0 in Laser Mode, or count + last-photon state
+    // in Photon Mode) instead of whatever was left over from before the switch.
+    renderSourceWave();
+    SEGMENTS.forEach(renderFreeSeg);
+    renderInterferenceOverlay();
     if(displayMode === "laser"){
       const s = computeDetectorSplit();
       showDetectorResult(s.d1, s.d2);
@@ -1739,9 +1806,12 @@
     }
     el.style.display = "";
     el.innerHTML = `
-      <div class="mode-switch complexity-switch" role="tablist" aria-label="Light mode" style="margin:0;">
-        <button id="displaymode-laser" class="${displayMode === "laser" ? "active" : ""}">Laser</button>
-        <button id="displaymode-photon" class="${displayMode === "photon" ? "active" : ""}">Photon</button>
+      <div class="complexity-row">
+        <span class="complexity-label">Light source:</span>
+        <div class="mode-switch complexity-switch" role="tablist" aria-label="Light mode">
+          <button id="displaymode-laser" class="${displayMode === "laser" ? "active" : ""}">Laser</button>
+          <button id="displaymode-photon" class="${displayMode === "photon" ? "active" : ""}">Photon</button>
+        </div>
       </div>
       <div class="photon-controls" id="photon-controls-inner" style="${displayMode === "photon" ? "" : "display:none;"}">
         <button class="btn" id="send-1-btn">Send 1 Photon</button>
@@ -1809,6 +1879,11 @@
           [...bankRow.querySelectorAll(".bank-tile")].forEach(t=>t.classList.remove("selected"));
         } else if(mode === "guided"){
           placeOrFlipGuided(key);
+        } else if(key === "src" && mode === "free" && displayMode === "photon"){
+          // Convenience shortcut for touch/phone use: tapping the source itself sends one photon,
+          // so you don't have to scroll down to the "Send 1 Photon" button every time. Only kicks in
+          // when nothing is selected to place, so it never steals a tap meant for placing a piece.
+          sendPhotons(1);
         }
       });
     });

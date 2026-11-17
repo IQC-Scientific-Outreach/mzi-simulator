@@ -200,7 +200,7 @@
   }
   .bs-btn:hover{ background: var(--crimson-tint); }
 
-  footer.note{ margin-top: 28px; font-size:12.5px; color: var(--ink-soft); text-align:center; }
+  footer.note{ margin-top: 28px; font-size:12.5px; color: var(--ink-soft); text-align:left; }
 
   @keyframes pulse-ring{
     0%{ r:6; opacity:.9; }
@@ -331,7 +331,7 @@
 
   <!-- Screen-reader-only status line: photon results, selections, placements, removals. -->
   <div id="sr-status" class="sr-only" role="status" aria-live="polite"></div>
-  <footer class="note">Companion tool for the teacher resource <a href="https://uwaterloo.ca/institute-for-quantum-computing/outreach/quantum-educators/teacher-resources" target="_blank" rel="noopener">&ldquo;Wave&ndash;Particle Duality, Revisited&rdquo;</a> lesson, exploring wave- and particle-like behaviour in the Mach-Zehnder Interferometer.<br>Developed by the Scientific Outreach team at the Institute for Quantum Computing (IQC), University of Waterloo.<br>The user interface development relied heavily on AI tools. Please contact iqc-outreach@uwaterloo.ca if you encounter any issues.<br>Similar tools include <a href="https://www.st-andrews.ac.uk/physics/quvis/simulations_html5/sims/QuantumBombGame/Quantum_bomb.html">QuVis</a>, <a href="https://quantumflytrap.com/">Quantum Flytrap</a>, and <a href="https://www.scielo.br/j/rbef/a/zjxXHGTynyNvpWbQH8BJsqQ/?lang=en">VMZI</a>.</footer>
+  <footer class="note">Companion tool for the teacher resource <a href="https://uwaterloo.ca/institute-for-quantum-computing/outreach/quantum-educators/teacher-resources" target="_blank" rel="noopener">&ldquo;Wave&ndash;Particle Duality, Revisited&rdquo;</a> lesson, exploring wave- and particle-like behaviour in the Mach-Zehnder Interferometer. Developed by the Scientific Outreach team at the Institute for Quantum Computing (IQC), University of Waterloo. Similar tools include <a href="https://www.st-andrews.ac.uk/physics/quvis/simulations_html5/sims/QuantumBombGame/Quantum_bomb.html">QuVis</a>, <a href="https://quantumflytrap.com/">Quantum Flytrap</a>, and <a href="https://www.scielo.br/j/rbef/a/zjxXHGTynyNvpWbQH8BJsqQ/?lang=en">VMZI</a>. The user interface development relied heavily on AI tools. Please contact iqc-outreach@uwaterloo.ca if you encounter any issues.</footer>
 </div>
 
 <script>
@@ -633,6 +633,7 @@
     renderSourceWave();
     SEGMENTS.forEach(renderFreeSeg);
     renderInterferenceOverlay();
+    updateFreeReadout();
   }
 
   function removeModifierEverywhere(mod){
@@ -1372,6 +1373,9 @@
     clearPendingExplosionNow();     // placing any new piece finalizes a lingering explosion right away
     clearPendingCorrectGuessNow();  // ...and a lingering correct-guess removal too
     lastExplodedMystery = false; // any new piece clears the "it exploded" message
+    // Pause Run when a Mystery firework goes in, so the stream of photons doesn't set it off before
+    // the student has had a chance to think about it.
+    if(type === "firework_mystery" && autoRunning) stopAuto();
     const mod = { id: modId++, type };
     if(type === "firework_mystery") mod.secret = Math.random() < 0.5 ? "dud" : "working";
     modifiers[key].push(mod);
@@ -1536,7 +1540,14 @@
     renderSourceWave();
     SEGMENTS.forEach(renderFreeSeg);
     renderInterferenceOverlay();
+    updateFreeReadout();
+  }
 
+  // The explanatory text under Settings (and, in Laser Mode, the detector percentages). Split out of
+  // autoAnalyze so it can be refreshed without resetting photon counts -- e.g. when a firework
+  // explodes or is cleared away after a guess.
+  function updateFreeReadout(){
+    if(mode !== "free") return;
     const s = computeDetectorSplit();
     const readout = document.getElementById("free-readout");
     const srcShifted = modifiers.src.some(m => m.type === "q" || m.type === "h");
@@ -1561,7 +1572,10 @@
           msg += ` BS1 is set to <b>${RATIO_LABELS[bsRatios.bs1]}</b> and BS2 to <b>${RATIO_LABELS[bsRatios.bs2]}</b>, so the split between D1 and D2 depends on both the beamsplitter ratios and the relative phase, not just the phase alone.`;
         }
       }
-      msg += `<br>Result: <b>${d1}%</b> to D1, <b>${d2}%</b> to D2.`;
+      // The "Result" percentages ignore fireworks entirely (they'd be wrong with a working one, and
+      // would hint at a mystery one), so leave the line out whenever any firework is in play.
+      const fireworkInPlay = displayMode === "photon" && anyFireworkPlaced();
+      if(!fireworkInPlay) msg += `<br>Result: <b>${d1}%</b> to D1, <b>${d2}%</b> to D2.`;
     }
 
     // Post-BS2 blocks stop an already-formed beam and always win, independent of the interference result.
@@ -1744,7 +1758,7 @@
     if(mod.guessResult === "incorrect"){
       el.innerHTML = `<div class="firework-panel-box">
         <p class="firework-q">Is the firework working or is it a dud?</p>
-        <div class="firework-result bad"><span class="firework-mark">&#10007;</span> Incorrect! Collect more data!</div>
+        <div class="firework-result bad"><span class="firework-mark">&#10007;</span> Incorrect! ${mod.secret === "working" ? "It was actually working." : "It was actually a dud."}</div>
       </div>`;
       return;
     }
@@ -1779,7 +1793,9 @@
     mod.guessResult = (guess === mod.secret) ? "correct" : "incorrect";
     renderFireworkGuessPanel();
     renderAllWaves(); // the guess is in, so the waves may now show what the firework really is
-    if(mod.guessResult === "correct"){
+    // Right or wrong, the answer is now settled (there are only two options), so the firework is
+    // cleared away after the same pause either way.
+    {
       const found = findMysteryFirework(); // still on the board at this point
       const key = found ? found.key : null;
       const timeoutId = setTimeout(()=> finalizeCorrectGuessRemoval(mod, key), 3000);
@@ -1939,6 +1955,7 @@
     }
     buildFreeBank(); // firework tiles only exist in Photon Mode, so the bank contents depend on this
     renderFireworkGuessPanel();
+    updateFreeReadout(); // the "Result" line depends on whether a firework is in play
   }
 
   function renderPhotonRow(){

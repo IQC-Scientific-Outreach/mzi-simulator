@@ -135,6 +135,7 @@
   .run-btn{ display:inline-flex; align-items:center; gap:6px; }
   .run-btn .btn-icon{ flex:none; }
   .firework-row{ flex-basis: 100%; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .firework-followup{ margin: -4px 0 14px; }
   .firework-panel-box{ margin: 10px 0 14px; padding:12px; background:#f6f4ee; border-radius:8px; border:1px solid var(--line); }
   .firework-q{ font-size:13.5px; margin:0 0 8px; color:var(--ink); }
   .firework-result{ font:700 14px var(--sans); display:flex; align-items:center; gap:8px; }
@@ -812,6 +813,11 @@
   // waiting out their normal on-screen duration.
   let pendingExplosionCleanup = null;   // { zoneKey, timeoutId }
   let pendingCorrectGuessCleanup = null; // { mod, key, timeoutId }
+  // Set the moment a Mystery firework is guessed (right or wrong): remembers where it was and how the
+  // guess went, so the panel can keep the verdict up and offer "Test New Firework" (same spot) and,
+  // while the old one is still on the board, "Clear Firework". Cleared as soon as any piece is added,
+  // a photon is sent, or the board is cleared.
+  let guessFollowUp = null; // { key, index, guessResult, secret }
   let photonCounts = { d1: 0, d2: 0 };
   let showWavesInPhoton = false;
   let photonSending = false;
@@ -976,6 +982,8 @@
       // batch) immediately finishes off any lingering explosion or correct-guess removal, in sync
       // with this photon's own animation, rather than leaving them to run out their own timers.
       clearPendingExplosionNow();
+      // Sending a photon retires the post-guess "Test New / Clear" options.
+      if(guessFollowUp){ guessFollowUp = null; renderFireworkGuessPanel(); }
       clearPendingCorrectGuessNow();
       // Under "reduce motion", a 100-photon burst would otherwise flash the source ~13 times a second.
       if(!((n > 1 || autoRunning) && prefersReducedMotion())) pulseSource();
@@ -1367,20 +1375,26 @@
     wireModIconRemoval(el, key);
   }
 
-  function addModifier(key, type){
+  // `index` (optional) inserts the piece at that position in the zone's list instead of at the end --
+  // used by "Test New Firework" to put a fresh Mystery firework exactly where the last one was.
+  function addModifier(key, type, index){
     const isFirework = type.indexOf("firework") === 0;
-    if(isFirework && anyFireworkPlaced()) return; // safety net -- the bank tiles should already be disabled
+    guessFollowUp = null;           // any new piece retires the post-guess "Test New / Clear" options
+                                    // (the panel is re-rendered at the end of this function)
+    clearPendingCorrectGuessNow();  // finalize a pending post-guess removal BEFORE the one-firework check
+    if(isFirework && anyFireworkPlaced()){ renderFireworkGuessPanel(); return; } // safety net -- the bank tiles should already be disabled
     clearPendingExplosionNow();     // placing any new piece finalizes a lingering explosion right away
-    clearPendingCorrectGuessNow();  // ...and a lingering correct-guess removal too
     lastExplodedMystery = false; // any new piece clears the "it exploded" message
     // Pause Run when a Mystery firework goes in, so the stream of photons doesn't set it off before
     // the student has had a chance to think about it.
     if(type === "firework_mystery" && autoRunning) stopAuto();
     const mod = { id: modId++, type };
     if(type === "firework_mystery") mod.secret = Math.random() < 0.5 ? "dud" : "working";
-    modifiers[key].push(mod);
+    if(index === undefined) modifiers[key].push(mod);
+    else modifiers[key].splice(Math.max(0, Math.min(index, modifiers[key].length)), 0, mod);
     autoAnalyze();
-    if(isFirework){ buildFreeBank(); renderFireworkGuessPanel(); }
+    buildFreeBank();
+    renderFireworkGuessPanel();
   }
 
   function armStats(keys){
@@ -1604,6 +1618,7 @@
     if(pendingCorrectGuessCleanup){ clearTimeout(pendingCorrectGuessCleanup.timeoutId); pendingCorrectGuessCleanup = null; }
     ["tl","tr","bl","br","src","d1out","d2out"].forEach(k=>{ modifiers[k] = []; });
     lastExplodedMystery = false; // Clear Inserted Pieces also resets the "it exploded" message
+    guessFollowUp = null;
     autoAnalyze();
     buildFreeBank();            // un-gray the firework tiles now that the board is empty
     renderFireworkGuessPanel(); // and drop the guess panel, since there's nothing left to guess about
@@ -1744,24 +1759,33 @@
     }
 
     const found = findMysteryFirework();
+    // After a guess: keep the verdict up (even once the firework has been cleared away) together
+    // with the follow-up options, until a piece is added or a photon is sent.
+    if(guessFollowUp){
+      const f = guessFollowUp;
+      const verdict = f.guessResult === "correct"
+        ? `<div class="firework-result good"><span class="firework-mark">&#10003;</span> ${f.secret === "working" ? "Correct! Firework ready for sale!" : "Correct! Can't sell that one."}</div>`
+        : `<div class="firework-result bad"><span class="firework-mark">&#10007;</span> Incorrect! ${f.secret === "working" ? "It was actually working." : "It was actually a dud."}</div>`;
+      const stillOnBoard = !!pendingCorrectGuessCleanup;
+      el.innerHTML = `<div class="firework-panel-box">
+        <p class="firework-q">Is the firework working or is it a dud?</p>
+        ${verdict}
+      </div>
+      <div class="btn-row firework-followup">
+        <button class="btn" id="test-new-fw-btn">Test New Firework</button>
+        ${stillOnBoard ? `<button class="btn" id="clear-fw-btn">Clear Firework</button>` : ""}
+      </div>`;
+      document.getElementById("test-new-fw-btn").addEventListener("click", testNewFirework);
+      const clearFwBtn = document.getElementById("clear-fw-btn");
+      if(clearFwBtn) clearFwBtn.addEventListener("click", ()=>{
+        clearPendingCorrectGuessNow(); // skip the rest of the pause: remove it right now
+        focusIfPresent("test-new-fw-btn");
+        announce("Firework cleared.");
+      });
+      return;
+    }
     if(!found){ el.innerHTML = ""; return; }
     const mod = found.mod;
-
-    if(mod.guessResult === "correct"){
-      const msg = mod.secret === "working" ? "Correct! Firework ready for sale!" : "Correct! Can't sell that one.";
-      el.innerHTML = `<div class="firework-panel-box">
-        <p class="firework-q">Is the firework working or is it a dud?</p>
-        <div class="firework-result good"><span class="firework-mark">&#10003;</span> ${msg}</div>
-      </div>`;
-      return;
-    }
-    if(mod.guessResult === "incorrect"){
-      el.innerHTML = `<div class="firework-panel-box">
-        <p class="firework-q">Is the firework working or is it a dud?</p>
-        <div class="firework-result bad"><span class="firework-mark">&#10007;</span> Incorrect! ${mod.secret === "working" ? "It was actually working." : "It was actually a dud."}</div>
-      </div>`;
-      return;
-    }
 
     el.innerHTML = `<div class="firework-panel-box">
       <p class="firework-q">Is the firework working or is it a dud?</p>
@@ -1777,11 +1801,11 @@
   // meant to "remain until the firework is cleared from the board." Getting it wrong is meant to
   // encourage gathering more evidence before the NEXT firework, not endless button-mashing on this one.
   function finalizeCorrectGuessRemoval(mod, key){
+    pendingCorrectGuessCleanup = null; // before re-rendering, so the panel drops "Clear Firework"
     removeModifierEverywhere(mod);
     renderAllWaves();
     buildFreeBank();
     renderFireworkGuessPanel();
-    pendingCorrectGuessCleanup = null;
   }
   function clearPendingCorrectGuessNow(){
     if(pendingCorrectGuessCleanup){
@@ -1789,9 +1813,19 @@
       finalizeCorrectGuessRemoval(pendingCorrectGuessCleanup.mod, pendingCorrectGuessCleanup.key);
     }
   }
+  // Puts a brand-new Mystery firework (with a freshly drawn 50/50 secret) exactly where the guessed
+  // one was. addModifier finishes removing the old one first and retires the follow-up options.
+  function testNewFirework(){
+    const f = guessFollowUp;
+    if(!f) return;
+    addModifier(f.key, "firework_mystery", f.index);
+    focusIfPresent("guess-working-btn");
+    announce(`New mystery firework placed on ${ZONE_NAMES[f.key]}.`);
+  }
   function makeFireworkGuess(mod, guess){
     mod.guessResult = (guess === mod.secret) ? "correct" : "incorrect";
-    renderFireworkGuessPanel();
+    const where = findMysteryFirework();
+    guessFollowUp = where ? { key: where.key, index: modifiers[where.key].indexOf(mod), guessResult: mod.guessResult, secret: mod.secret } : null;
     renderAllWaves(); // the guess is in, so the waves may now show what the firework really is
     // Right or wrong, the answer is now settled (there are only two options), so the firework is
     // cleared away after the same pause either way.
@@ -1801,6 +1835,7 @@
       const timeoutId = setTimeout(()=> finalizeCorrectGuessRemoval(mod, key), 3000);
       pendingCorrectGuessCleanup = { mod, key, timeoutId };
     }
+    renderFireworkGuessPanel(); // after the pending removal is set up, so "Clear Firework" shows
   }
 
   function setComplexity(val){

@@ -676,9 +676,10 @@
   // Mystery variant, clears the "it exploded" message too -- both the visual and the message are
   // meant to disappear together.
   function finalizeExplosionCleanup(zoneKey){
+    pendingExplosionCleanup = null; // before re-rendering, so the panel drops "Clear Firework"
     reRenderZone(zoneKey);
     if(lastExplodedMystery){ lastExplodedMystery = false; renderFireworkGuessPanel(); }
-    pendingExplosionCleanup = null;
+    else if(guessFollowUp) renderFireworkGuessPanel();
   }
   // If something is still showing from an earlier explosion, wrap it up right now instead of letting
   // it linger — used whenever a new piece is placed, Clear is pressed, or another photon is sent.
@@ -1014,7 +1015,13 @@
           // Remove it from the data model immediately (so the very next photon in this same batch
           // can't possibly encounter an already-exploded firework), then play a purely cosmetic
           // starburst before that zone's next render naturally omits it.
-          if(result.exploded.mod.type === "firework_mystery") lastExplodedMystery = true;
+          if(result.exploded.mod.type === "firework_mystery"){
+            lastExplodedMystery = true;
+            // An explosion settles the question just like a guess does, so offer the same
+            // "Test New Firework" (same spot) / "Clear Firework" follow-up options.
+            const exKey = result.exploded.key;
+            guessFollowUp = { key: exKey, index: modifiers[exKey].indexOf(result.exploded.mod), exploded: true, secret: "working" };
+          }
           removeModifierEverywhere(result.exploded.mod);
           playExplosion(result.exploded.key, result.exploded.x);
           buildFreeBank();
@@ -1750,7 +1757,7 @@
     // The mystery firework itself is gone once it's exploded, so this has to be checked before
     // falling back to "is one even on the board?" -- otherwise the panel would just go blank right
     // at the most informative moment.
-    if(lastExplodedMystery){
+    if(lastExplodedMystery && !guessFollowUp){ // with follow-up options, the branch below shows this message
       el.innerHTML = `<div class="firework-panel-box">
         <p class="firework-q">Is the firework working or is it a dud?</p>
         <div class="firework-result bad"><span class="firework-mark">!</span> Oh no! The firework exploded. I guess it worked.</div>
@@ -1763,10 +1770,13 @@
     // with the follow-up options, until a piece is added or a photon is sent.
     if(guessFollowUp){
       const f = guessFollowUp;
-      const verdict = f.guessResult === "correct"
+      let verdict = f.guessResult === "correct"
         ? `<div class="firework-result good"><span class="firework-mark">&#10003;</span> ${f.secret === "working" ? "Correct! Firework ready for sale!" : "Correct! Can't sell that one."}</div>`
         : `<div class="firework-result bad"><span class="firework-mark">&#10007;</span> Incorrect! ${f.secret === "working" ? "It was actually working." : "It was actually a dud."}</div>`;
-      const stillOnBoard = !!pendingCorrectGuessCleanup;
+      if(f.exploded) verdict = `<div class="firework-result bad"><span class="firework-mark">!</span> Oh no! The firework exploded. I guess it worked.</div>`;
+      // "Still on the board" = its removal animation hasn't finished yet (the post-guess pause, or
+      // the explosion's starburst).
+      const stillOnBoard = f.exploded ? !!pendingExplosionCleanup : !!pendingCorrectGuessCleanup;
       el.innerHTML = `<div class="firework-panel-box">
         <p class="firework-q">Is the firework working or is it a dud?</p>
         ${verdict}
@@ -1778,7 +1788,8 @@
       document.getElementById("test-new-fw-btn").addEventListener("click", testNewFirework);
       const clearFwBtn = document.getElementById("clear-fw-btn");
       if(clearFwBtn) clearFwBtn.addEventListener("click", ()=>{
-        clearPendingCorrectGuessNow(); // skip the rest of the pause: remove it right now
+        // skip the rest of the pause / starburst: remove it right now
+        if(guessFollowUp && guessFollowUp.exploded) clearPendingExplosionNow(); else clearPendingCorrectGuessNow();
         focusIfPresent("test-new-fw-btn");
         announce("Firework cleared.");
       });

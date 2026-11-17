@@ -1024,6 +1024,10 @@
           }
           removeModifierEverywhere(result.exploded.mod);
           playExplosion(result.exploded.key, result.exploded.x);
+          // Any explosion pauses Run, so the result (and, for a Mystery firework, the follow-up
+          // options) stays on screen instead of being swept away by the next photon. Silent: the
+          // per-photon announcement below already says the firework went off.
+          if(autoRunning) stopAuto(true);
           buildFreeBank();
           renderFireworkGuessPanel();
         }

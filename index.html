@@ -132,6 +132,8 @@
   .bank-tile:active{ cursor:grabbing; }
   .bank-tile.selected{ box-shadow: 0 0 0 3px var(--crimson-tint), 2px 2px 0 var(--crimson); border-color: var(--crimson); }
   .bank-tile.tile-disabled{ opacity:.4; cursor:not-allowed; }
+  .run-btn{ display:inline-flex; align-items:center; gap:6px; }
+  .run-btn .btn-icon{ flex:none; }
   .firework-row{ flex-basis: 100%; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
   .firework-panel-box{ margin: 10px 0 14px; padding:12px; background:#f6f4ee; border-radius:8px; border:1px solid var(--line); }
   .firework-q{ font-size:13.5px; margin:0 0 8px; color:var(--ink); }
@@ -589,6 +591,50 @@
     return armHasWorkingWatcher(TOP_SEGMENTS) || armHasWorkingWatcher(BOTTOM_SEGMENTS);
   }
 
+  // ---------- How fireworks shape the drawn waves (Photon Mode only) ----------
+  // A Mystery firework stays "hidden" until the student commits to a guess. While hidden, the waves
+  // must look identical whether it's secretly working or a dud, so it is drawn as the most cautious
+  // case: its own wave stops at the firework, the other arm's wave stops at the matching point, and
+  // nothing is drawn downstream (no waves to the detectors, interference captions read "???").
+  // A Working firework (or a Mystery one after the guess, if it was working) stops only the wave it
+  // sits on -- the opposite path is left alone. A Dud never touches the waves.
+  function isHiddenMystery(m){ return !!m && m.type === "firework_mystery" && !m.guessResult; }
+  function fireworkStopsWave(m){
+    if(displayMode !== "photon" || !m || !m.type || m.type.indexOf("firework") !== 0) return false;
+    if(isHiddenMystery(m)) return true;
+    return fireworkEffectiveType(m) === "working";
+  }
+  // The board's one Mystery firework, if it is still hidden (Photon Mode only), with its zone.
+  function hiddenMysteryLocation(){
+    if(displayMode !== "photon") return null;
+    const found = findMysteryFirework();
+    return (found && isHiddenMystery(found.mod)) ? found : null;
+  }
+  // A hidden Mystery firework sitting upstream of BS2 (before BS1 or on either arm) -- anything the
+  // detectors show would depend on its secret, so the downstream waves and captions are withheld.
+  function hiddenMysteryUpstreamOfBs2(){
+    const hm = hiddenMysteryLocation();
+    return !!hm && (hm.key === "src" || SEGMENTS.indexOf(hm.key) !== -1);
+  }
+  // Same-position partner of each arm segment on the opposite arm.
+  const PARTNER_SEG = { tl: "bl", bl: "tl", tr: "br", br: "tr" };
+  // If a hidden Mystery firework is on the partner segment of `key`, the fraction along `key` at
+  // which this wave must also stop (so neither arm gives away which way the photon "could" go).
+  function mirroredMysteryCutFrac(key){
+    const hm = hiddenMysteryLocation();
+    if(!hm || PARTNER_SEG[hm.key] !== key) return null;
+    const mods = modifiers[hm.key];
+    return (mods.indexOf(hm.mod) + 1) / (mods.length + 1);
+  }
+  // Redraws every wave zone from scratch WITHOUT touching photon counts (unlike autoAnalyze). This
+  // also wipes any per-photon "which path" hiding, so all waves come back fresh.
+  function renderAllWaves(){
+    if(mode !== "free") return;
+    renderSourceWave();
+    SEGMENTS.forEach(renderFreeSeg);
+    renderInterferenceOverlay();
+  }
+
   function removeModifierEverywhere(mod){
     ALL_ZONES.forEach(key=>{
       const idx = modifiers[key].indexOf(mod);
@@ -597,10 +643,10 @@
   }
   // Re-renders whichever part of the diagram a given zone belongs to, without touching photon counts
   // (unlike autoAnalyze) -- used right after an explosion removes a firework mid-batch.
+  // Since a firework now shapes waves on other zones too (the matching cut on the opposite arm, the
+  // waves to the detectors, the interference captions), removing one always redraws every zone.
   function reRenderZone(key){
-    if(key === "src") renderSourceWave();
-    else if(SEGMENTS.indexOf(key) !== -1) renderFreeSeg(key);
-    else if(key === "d1out" || key === "d2out") renderInterferenceOverlay();
+    renderAllWaves();
   }
 
   const FIREWORK_COLORS = { dud: "#9a9a9a", working: "#e8622c", mystery: "#b6a688" };
@@ -933,8 +979,14 @@
       // Under "reduce motion", a 100-photon burst would otherwise flash the source ~13 times a second.
       if(!((n > 1 || autoRunning) && prefersReducedMotion())) pulseSource();
       setTimeout(()=>{
+        // Which arm a photon took is only "known" for a hidden Mystery firework if it's secretly
+        // working -- so unless something else on the arms (an Observer or a Block) already makes the
+        // path knowable, or the firework actually exploded, revealing it would spoil the mystery.
+        const mysteryWasHidden = hiddenMysteryUpstreamOfBs2();
+        const pathKnowableAnyway = anyArmHasNdm() || armStats(TOP_SEGMENTS).blocked || armStats(BOTTOM_SEGMENTS).blocked;
         const result = simulateOnePhoton();
-        applyPhotonPathReveal(result.armChosen, result.wentToD1);
+        const revealArm = (!mysteryWasHidden || pathKnowableAnyway || !!result.exploded) ? result.armChosen : null;
+        applyPhotonPathReveal(revealArm, result.wentToD1);
         if(result.d1Fired){ photonCounts.d1++; pulseDetector("d1-group"); }
         if(result.d2Fired){ photonCounts.d2++; pulseDetector("d2-group"); }
         result.ndmHits.forEach(mod=>{
@@ -960,7 +1012,7 @@
           renderFireworkGuessPanel();
         }
         updatePhotonCountDisplay();
-        if(n === 1 && !autoRunning) announce(describePhoton(result)); // after counts update, so totals are current; quiet during Automatic
+        if(n === 1 && !autoRunning) announce(describePhoton(result)); // after counts update, so totals are current; quiet during Run
         i++;
         setTimeout(step, 30);
       }, 45);
@@ -1202,7 +1254,7 @@
     return mods.map((m,i)=>({
       frac: (i+1)/(n+1),
       dphi: m.type === "q" ? Math.PI/2 : m.type === "h" ? Math.PI : 0,
-      block: m.type === "block"
+      block: m.type === "block" || fireworkStopsWave(m)
     }));
   }
   function modsIcons(mods, length, key){
@@ -1256,8 +1308,9 @@
     (modifiers[key] || []).forEach(m=>{
       if(m.type === "q") quarters += 1;
       else if(m.type === "h") quarters += 2;
-      else if(m.type === "block") blocked = true;
+      else if(m.type === "block" || fireworkStopsWave(m)) blocked = true;
     });
+    if(mirroredMysteryCutFrac(key) !== null) blocked = true;
     return { quarters, blocked };
   }
   // A mirror reflection always carries an inherent π phase shift ("if it was going up, it's now
@@ -1288,6 +1341,8 @@
     const mods = modifiers[key] || [];
     const blocked = entry.blocked;
     const bp = blocked ? [{ frac: 0, block: true }] : modsToBreakpoints(mods);
+    const mirrorCut = mirroredMysteryCutFrac(key);
+    if(!blocked && mirrorCut !== null) bp.push({ frac: mirrorCut, block: true });
     const initPhase = blocked ? 0 : entry.quarters * (Math.PI/2);
     const d = buildWavePath(length, cycles, initPhase, bp, amplitude);
     const pathTag = d ? `<path class="wave-path" d="${d}" stroke="${color}" stroke-width="3.2" fill="none" stroke-linejoin="round" stroke-linecap="round"/>` : "";
@@ -1402,16 +1457,30 @@
     const noInterference = f1 === 0 || f1 === 1 || f2 === 0 || f2 === 1;
     const bothDefaultRatio = bsRatios.bs1 === 3 && bsRatios.bs2 === 3;
 
+    // Fireworks (Photon Mode only): a hidden Mystery firework before BS2 hides the answer ("???");
+    // a known-working one before BS1 means nothing ever reaches BS2 (no caption at all); a
+    // known-working one on an arm is a which-path watcher, so there's no interference. Dud fireworks
+    // and fireworks after BS2 leave the captions alone.
+    const mysteryHidesResult = hiddenMysteryUpstreamOfBs2();
+    const workingOnSrc = modifiers.src.some(m => !isHiddenMystery(m) && fireworkStopsWave(m));
+    const workingOnArm = SEGMENTS.some(k => modifiers[k].some(m => !isHiddenMystery(m) && fireworkStopsWave(m)));
+    // A pi/2 (or 3pi/2) relative phase kills the cross term, so whenever either beamsplitter is 50/50
+    // the outputs split exactly evenly -- not "partial" interference, but not "no interference" either.
+    const balanced = (delta === 1 || delta === 3) && (f1 === 0.5 || f2 === 0.5);
+
     function label(isD1){
       const ownBlocked = isD1 ? d1OwnBlocked : d2OwnBlocked;
       if(ownBlocked || bothArmsBlocked) return "No Light Detected";
+      if(mysteryHidesResult) return "???";
+      if(workingOnSrc) return "";
       if(oneArmBlocked) return "";
       if(noInterference) return "No Interference";
-      if(anyArmHasNdm()) return "No Interference";
+      if(anyArmHasNdm() || workingOnArm) return "No Interference";
       const constructiveDelta = isD1 ? 0 : 2;
       const destructiveDelta = isD1 ? 2 : 0;
       if(delta === constructiveDelta) return bothDefaultRatio ? "constructive" : "partial constructive";
       if(delta === destructiveDelta) return bothDefaultRatio ? "destructive" : "partial destructive";
+      if(balanced) return "balanced";
       return "partial";
     }
 
@@ -1695,7 +1764,7 @@
   // encourage gathering more evidence before the NEXT firework, not endless button-mashing on this one.
   function finalizeCorrectGuessRemoval(mod, key){
     removeModifierEverywhere(mod);
-    if(key) reRenderZone(key);
+    renderAllWaves();
     buildFreeBank();
     renderFireworkGuessPanel();
     pendingCorrectGuessCleanup = null;
@@ -1709,6 +1778,7 @@
   function makeFireworkGuess(mod, guess){
     mod.guessResult = (guess === mod.secret) ? "correct" : "incorrect";
     renderFireworkGuessPanel();
+    renderAllWaves(); // the guess is in, so the waves may now show what the firework really is
     if(mod.guessResult === "correct"){
       const found = findMysteryFirework(); // still on the board at this point
       const key = found ? found.key : null;
@@ -1806,17 +1876,18 @@
   // wave is hidden if EITHER fact rules it out -- computed together here rather than as two separate
   // passes that would silently overwrite one another when both kinds of information are available.
   function applyPhotonPathReveal(armChosen, wentToD1){
-    if(armChosen !== null){
-      const topShown = armChosen === "top";
-      ["tl","tr"].forEach(key=>{
-        const path = segContentEl(key) && segContentEl(key).querySelector(".wave-path");
-        if(path) path.style.display = topShown ? "" : "none";
-      });
-      ["bl","br"].forEach(key=>{
-        const path = segContentEl(key) && segContentEl(key).querySelector(".wave-path");
-        if(path) path.style.display = topShown ? "none" : "";
-      });
-    }
+    // With no which-path information for this photon, BOTH arms must be visible again -- otherwise a
+    // previous photon's reveal (e.g. the one that set off a firework) would linger indefinitely.
+    const topShown = armChosen === null || armChosen === "top";
+    const botShown = armChosen === null || armChosen === "bottom";
+    ["tl","tr"].forEach(key=>{
+      const path = segContentEl(key) && segContentEl(key).querySelector(".wave-path");
+      if(path) path.style.display = topShown ? "" : "none";
+    });
+    ["bl","br"].forEach(key=>{
+      const path = segContentEl(key) && segContentEl(key).querySelector(".wave-path");
+      if(path) path.style.display = botShown ? "" : "none";
+    });
     const watchingOutputs = modifiers.d1out.some(m => m.type === "ndm") || modifiers.d2out.some(m => m.type === "ndm");
     const portKnown = wentToD1 !== null && watchingOutputs;
     ["d1","d2"].forEach(portKey=>{
@@ -1889,10 +1960,10 @@
       </div>
       <div class="photon-controls" id="photon-controls-inner" style="${displayMode === "photon" ? "" : "display:none;"}">
         <button class="btn" id="send-1-btn" ${autoRunning ? "disabled" : ""}>Send 1 Photon</button>
-        <button class="btn" id="auto-btn" aria-pressed="${autoRunning}">${autoRunning ? "Pause" : "Automatic"}</button>
+        <button class="btn run-btn" id="auto-btn" aria-pressed="${autoRunning}">${autoRunning ? PAUSE_ICON + "Pause" : PLAY_ICON + "Run"}</button>
         <div class="complexity-row" style="flex-basis:100%; margin:0;">
           <span class="complexity-label">Speed:</span>
-          <div class="mode-switch complexity-switch" role="group" aria-label="Automatic speed">
+          <div class="mode-switch complexity-switch" role="group" aria-label="Run speed">
             <button id="speed-slow" class="${autoSpeed === "slow" ? "active" : ""}" aria-pressed="${autoSpeed === "slow"}">Slow</button>
             <button id="speed-fast" class="${autoSpeed === "fast" ? "active" : ""}" aria-pressed="${autoSpeed === "fast"}">Fast</button>
           </div>
@@ -1932,12 +2003,14 @@
     }, 60);
   }
 
-  // ---------- Automatic mode ----------
-  // "Automatic" sends one photon per tick until paused: Slow = 1 per second (default), Fast = 10 per
+  // ---------- Run mode ----------
+  // "Run" sends one photon per tick until paused: Slow = 1 per second (default), Fast = 10 per
   // second. Each tick is an ordinary single-photon send, so every per-photon behaviour (observer eyes,
   // path reveal, fireworks, early cleanup of explosions) works exactly as it does for "Send 1 Photon".
   // A tick is simply skipped if the previous photon's short animation is still finishing.
   let autoRunning = false;
+  const PLAY_ICON = `<svg class="btn-icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2.5 1.5 L10.5 6 L2.5 10.5 Z" fill="currentColor"/></svg>`;
+  const PAUSE_ICON = `<svg class="btn-icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" rx="0.6" fill="currentColor"/><rect x="7" y="1.5" width="3" height="9" rx="0.6" fill="currentColor"/></svg>`;
   let autoSpeed = "slow"; // "slow" | "fast"
   let autoTimer = null;
   const AUTO_INTERVAL_MS = { slow: 1000, fast: 100 };
